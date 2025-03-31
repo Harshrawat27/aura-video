@@ -36,7 +36,14 @@ function setupHeadingVisibilityWatcher() {
   function rebuildVideoList() {
     console.log('Rebuilding video list based on visible headings');
 
-    // Get original videos
+    // Save current playing state and current tag before rebuilding
+    const currentlyPlaying = isVideoPlaying;
+    const currentTag =
+      videos && videos.length > 0 && currentIndex < videos.length
+        ? videos[currentIndex].dataset.tag
+        : null;
+
+    // Get original videos - these are the actual source videos, not the clones
     const originalVideos = Array.from(
       document.querySelectorAll('.youtube-short')
     );
@@ -47,8 +54,16 @@ function setupHeadingVisibilityWatcher() {
       (heading) => window.getComputedStyle(heading).display !== 'none'
     );
 
+    console.log('Visible headings found:', visibleHeadings.length);
+
+    // If no visible headings, don't proceed
+    if (visibleHeadings.length === 0) {
+      console.warn('No visible headings found, keeping current videos');
+      return videos || [];
+    }
+
     // Create a mapping of videos for each visible tag
-    let videos = [];
+    let newVideos = [];
     const headingTags = visibleHeadings.map((heading) =>
       heading.textContent.trim()
     );
@@ -81,19 +96,25 @@ function setupHeadingVisibilityWatcher() {
           clonedVideo.dataset.tag = tag;
           clonedVideo.dataset.tagPosition = videosPerTag[tag];
 
-          videos.push(clonedVideo);
+          newVideos.push(clonedVideo);
         }
       });
     });
 
     // Sort videos based on tag order
-    videos.sort((a, b) => {
+    newVideos.sort((a, b) => {
       const tagA = a.dataset.tag;
       const tagB = b.dataset.tag;
       const indexA = headingTags.indexOf(tagA);
       const indexB = headingTags.indexOf(tagB);
       return indexA - indexB;
     });
+
+    // If no videos were found for visible tags, log and return early
+    if (newVideos.length === 0) {
+      console.warn('No videos found for visible tags');
+      return videos || [];
+    }
 
     // Replace original videos with our new organized list
     // First, clear the shorts wrapper
@@ -102,17 +123,40 @@ function setupHeadingVisibilityWatcher() {
     }
 
     // Then add our new organized videos
-    videos.forEach((video) => {
+    newVideos.forEach((video) => {
       shortsWrapper.appendChild(video);
     });
 
-    // Reset current index and setup first video
-    currentIndex = 0;
-    if (videos.length > 0) {
-      videos[0].classList.add('active');
-      videos[0].style.zIndex = '1';
+    // Try to find the previously active tag in the new list
+    let startIndex = 0;
+    if (currentTag) {
+      const sameTagIndex = newVideos.findIndex(
+        (v) => v.dataset.tag === currentTag
+      );
+      if (sameTagIndex !== -1) {
+        startIndex = sameTagIndex;
+        console.log(
+          `Found previous tag "${currentTag}" at index ${startIndex}`
+        );
+      }
+    }
 
-      const initialTag = videos[0].dataset.tag;
+    // Reset current index and setup video
+    currentIndex = startIndex;
+
+    if (newVideos.length > 0) {
+      // Reset all videos first
+      newVideos.forEach((video) => {
+        video.classList.remove('active');
+        video.style.zIndex = '0';
+        video.style.transform = '';
+      });
+
+      // Set active video
+      newVideos[startIndex].classList.add('active');
+      newVideos[startIndex].style.zIndex = '1';
+
+      const initialTag = newVideos[startIndex].dataset.tag;
       headings.forEach((heading) => {
         if (heading.textContent.trim() === initialTag) {
           heading.classList.add('active');
@@ -121,60 +165,71 @@ function setupHeadingVisibilityWatcher() {
         }
       });
 
-      // Setup the first video's iframe if needed
-      const firstIframe = videos[0].querySelector('iframe');
-      if (firstIframe) {
-        // Ensure proper setup based on browser/device
-        if (isChrome() || isWindows() || isAndroid()) {
-          // First completely remove the iframe and create a new one
-          const parent = firstIframe.parentNode;
-          const originalSrc = firstIframe.getAttribute('src');
+      // Setup the video's iframe if needed
+      const videoIframe = newVideos[startIndex].querySelector('iframe');
+      if (videoIframe) {
+        try {
+          // Set up iframe
+          const parent = videoIframe.parentNode;
+          const originalSrc = videoIframe.getAttribute('src');
 
-          // Create a new iframe element
-          const newIframe = document.createElement('iframe');
+          if (originalSrc) {
+            // Create a new iframe element
+            const newIframe = document.createElement('iframe');
 
-          // Copy all attributes except src
-          for (let i = 0; i < firstIframe.attributes.length; i++) {
-            const attr = firstIframe.attributes[i];
-            if (attr.name !== 'src') {
-              newIframe.setAttribute(attr.name, attr.value);
+            // Copy all attributes except src
+            for (let i = 0; i < videoIframe.attributes.length; i++) {
+              const attr = videoIframe.attributes[i];
+              if (attr.name !== 'src') {
+                newIframe.setAttribute(attr.name, attr.value);
+              }
+            }
+
+            // Set src based on whether it should autoplay
+            const modifiedSrc = getModifiedSrc(originalSrc, currentlyPlaying);
+            newIframe.src = modifiedSrc;
+
+            // Replace the old iframe
+            parent.replaceChild(newIframe, videoIframe);
+            isVideoPlaying = currentlyPlaying;
+
+            // For YouTube to register the command, add a play message after load
+            if (currentlyPlaying) {
+              setTimeout(() => {
+                try {
+                  if (newIframe.contentWindow) {
+                    newIframe.contentWindow.postMessage(
+                      '{"event":"command","func":"playVideo","args":""}',
+                      '*'
+                    );
+                  }
+                } catch (e) {
+                  console.error('Error sending play command to video:', e);
+                }
+              }, 500);
             }
           }
-
-          // Force autoplay on
-          const modifiedSrc = getModifiedSrc(originalSrc, true);
-          newIframe.src = modifiedSrc;
-
-          // Replace the old iframe
-          parent.replaceChild(newIframe, firstIframe);
-          isVideoPlaying = true;
-
-          // For YouTube to register the autoplay, add a click event automatically after load
-          setTimeout(() => {
-            try {
-              newIframe.contentWindow.postMessage(
-                '{"event":"command","func":"playVideo","args":""}',
-                '*'
-              );
-            } catch (e) {
-              console.error('Error forcing play on first video:', e);
-            }
-          }, 500);
+        } catch (e) {
+          console.error('Error setting up iframe:', e);
         }
       }
 
       // Update sticky info if available
       if (typeof updateStickyInfo === 'function') {
-        updateStickyInfo(0);
+        updateStickyInfo(startIndex);
       }
 
       // Prepare adjacent videos if available
       if (typeof prepareAdjacentVideos === 'function') {
-        prepareAdjacentVideos(0);
+        prepareAdjacentVideos(startIndex);
       }
+
+      console.log(
+        `Video display initialized at index ${startIndex} with tag "${initialTag}"`
+      );
     }
 
-    return videos;
+    return newVideos;
   }
 
   // Set up mutation observer to watch for style changes in headings
@@ -186,22 +241,47 @@ function setupHeadingVisibilityWatcher() {
         mutation.type === 'attributes' &&
         mutation.attributeName === 'style'
       ) {
-        shouldRebuild = true;
+        // Check if display actually changed to/from 'none'
+        const target = mutation.target;
+        const isVisible = window.getComputedStyle(target).display !== 'none';
+
+        // Get previous visibility state from dataset
+        const wasVisible = target.dataset.wasVisible !== 'false';
+
+        // If visibility changed, mark for rebuild
+        if (isVisible !== wasVisible) {
+          shouldRebuild = true;
+          // Store current state for next comparison
+          target.dataset.wasVisible = isVisible;
+          console.log(
+            `Heading "${target.textContent.trim()}" visibility changed to: ${
+              isVisible ? 'visible' : 'hidden'
+            }`
+          );
+        }
       }
     });
 
     if (shouldRebuild) {
-      // Rebuild videos and update the global videos array
-      videos = rebuildVideoList();
-      console.log('Videos rebuilt. New count:', videos.length);
+      // Small delay to let all style changes apply
+      setTimeout(() => {
+        // Rebuild videos and update the global videos array
+        videos = rebuildVideoList();
+        console.log('Videos rebuilt. New count:', videos.length);
+      }, 50);
     }
   });
 
-  // Observe each heading for style attribute changes
+  // Initialize visibility state and observe each heading
   headings.forEach((heading) => {
+    // Store initial visibility state
+    const isVisible = window.getComputedStyle(heading).display !== 'none';
+    heading.dataset.wasVisible = isVisible;
+
+    // Observe for style changes
     headingObserver.observe(heading, {
       attributes: true,
-      attributeFilter: ['style'],
+      attributeFilter: ['style', 'class'], // Watch both style and class changes
     });
   });
 
