@@ -1,3 +1,5 @@
+// testing update - 2
+
 // Get the user agent string
 const userAgent = navigator.userAgent.toLowerCase();
 
